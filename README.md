@@ -24,7 +24,7 @@ Time-series algorithms only understand time, not culture. To account for the mas
 ### 3. Addressing Heteroscedasticity (Log Transformation)
 Environmental data is highly heteroscedastic—the variance of the pollution spikes scales with the concentration levels. To stabilize this variance and generate honest, symmetric prediction intervals, a `log1p` transformation was applied. The final forecast was back-transformed using `expm1()` for human interpretability.
 
-![Log Transformed Model](plots/prophet_model3.png)
+![Log Transformed Model](images/prophet_model3.png)
 
 ## Key Insights
 1. **Seasonality is King:** PM2.5 in Beijing is heavily dictated by the winter heating cycle (starting in November) and weekly industrial output.
