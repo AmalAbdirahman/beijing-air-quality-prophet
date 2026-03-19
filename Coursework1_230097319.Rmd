@@ -1,0 +1,253 @@
+---
+title: "MTH6139 Time Series" 
+subtitle: "Coursework 1 -- 230097319" 
+author: "Amal Abdirahman" 
+date: "Spring term 2026" 
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    theme: spacelab 
+    highlight: tango
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r, echo=FALSE}
+# This code will display the QMUL logo at the top right of the page
+# Do not change this code
+htmltools::img(src = knitr::image_uri("images/QMlogo.png"),
+               alt = 'logo',
+               style = 'position:absolute; top:0; right:0; padding:10px; width:20%;')
+```
+
+# Overview
+
+I used Meta's Prophet to analyse and forecast atmospheric PM2.5
+concentrations in Beijing. This dataset contains PM2.5 data of the US
+Embassy in Beijing, recorded between January 2010 and December 2014.
+
+An initial visual analysis revealed a highly seasonal pattern with
+massive pollution spikes occurring during the winter months, contrasted
+by lower concentrations in the summer. To address these complexities,
+the Prophet model was deployed across three iterations: a baseline
+model, a holiday-adjusted model to account for the Lunar New Year, and a
+log transformed model to stabilise the extreme variance observed in the
+historical data.
+
+![](https://www.smithschool.ox.ac.uk/sites/default/files/2024-06/beijing-air-pollution-_adobestock_343004423.webp)
+
+Beijing
+
+# 1 R Libraries
+
+I used these libraries in my project.
+
+```{r}
+library(dplyr)
+library(lubridate)
+library(prophet)
+library(ggplot2)
+```
+
+# 2 Data Preparation
+
+Before modelling the data, it must be cleaned and transformed to a
+specific format to fit prophet. Prophet requires a `dataframe` (not a
+`ts` object) with two specific columns: `ds` (datestamp) and `y`.
+
+**Why dplyr and lubridate?**
+
+While using the basic R syntax was possible, I found it to be quite
+confusing to understand and using `dplyr` was better suited for its
+readability and it being easier to use. I used `lubridate` to handle the
+complexities of date conversion, as prophet can only work if formatted
+as YYYY-MM-DD. The dataset had entries per hour, per day from 2010 to
+2014, converting 'year', 'month', 'date' into a single `Date`, made the
+data suitable for Prophet.
+
+```{r}
+# Load the air quality data
+beijing_raw <- read.csv("data/PRSA_data_2010.1.1-2014.12.31.csv")
+
+# Clean the Data (using dplyr)
+beijing_data <- beijing_raw %>%
+    # Create Date object and and deal with blank values
+    mutate(
+        ds = make_date(year, month, day),
+        pm2.5 = ifelse(pm2.5 == -999, NA, pm2.5)
+    ) %>%
+    # Aggregate to daily averages
+    group_by(ds) %>%
+    summarise(
+        y_raw = mean(pm2.5, na.rm = TRUE),
+        .groups = "drop"
+    ) %>%
+    # Remove blank days and arrange it chronologically
+    filter(!is.na(y_raw)) %>%
+    arrange(ds)
+#formatting for prophet
+prophet_basic_data <- data.frame(ds = beijing_data$ds, y = beijing_data$y_raw)
+```
+
+# 3 Model 1: Basic Prophet Forecast
+
+I first trialled Prophet on the model just to see how Prophet works, and
+how well it works with this data
+
+```{r}
+#Fit basic model
+basic_model<-prophet(prophet_basic_data)
+# Forecast
+future_basic <- make_future_dataframe(basic_model, periods = 90)
+forecast_basic <- predict(basic_model, future_basic)
+
+
+# Plot the baseline model
+plot(basic_model, forecast_basic) +
+    ggtitle("Model 1: Prophet Basic Model") +
+    xlab("Date") +
+    ylab("PM2.5 (μg/m³)") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+The **black dots** represent the actual PM2.5 readings. The **dark blue
+line** (`yhat`) is Prophet's best guess of the trend. The **light blue
+band** represents the 80% Prediction Interval.
+
+This model identifies the wave, the fact that pollution is higher in the
+winter months, but it does not properly predict it. As you can see most
+of the black dots escape the prediction interval, with some past
+400$\mu$/$m^3$. This model does not understand why this is happening.
+
+# 4 Model 2: Adding Context to the Model
+
+In Beijing, the Lunar New Year triggers a massive, temporary surge in
+PM2.5 due to widespread fireworks, followed immediately by a dramatic
+drop as factories and businesses shut down for the holiday week. We add
+`holidays` data frame into the model to show this.
+
+```{r}
+# Create the holiday dataframe
+chinese_new_year <- data.frame(
+    holiday = "chinese_new_year",
+    ds = as.Date(c("2010-02-14", "2011-02-03", "2012-01-23",
+                   "2013-02-10", "2014-01-31")),
+    lower_window = -1, #The day before 
+    upper_window = 2 #The day after 
+)
+# Run the model with holidays
+prophet_model2 <- prophet(prophet_basic_data, holidays = chinese_new_year)
+future_model2 <- make_future_dataframe(prophet_model2, periods = 90)
+forecast_model2 <- predict(prophet_model2, future_model2)
+
+# Plot the components
+prophet_plot_components(prophet_model2, forecast_model2)
+```
+
+The **trend panel**: this shows a downward trend in the baseline PM2.5
+levels from 2010 to 2014. This aligns with the introduction of China's
+aggressive "Air Pollution Prevention and Control Action Plan"
+implemented around 2013, which aimed to drastically reduce coal reliance
+in the capital.
+
+The **holiday panel**: this proves that our new addition works. There's
+a spike on the exact dates on Chinese New Year, following a crash from
+the factory shutdown for the holidays.
+
+The **yearly panel**: This captures the seasonal heating cycle.
+Pollution climbs in November then drops in the spring. This mirrors when
+central winter heating is being used across households.
+
+```{r}
+plot(prophet_model2, forecast_model2) +
+    ggtitle("Model 2: Prophet Model with Chinese New Year") +
+    xlab("Date") +
+    ylab("PM2.5 (μg/m³)") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5))
+```
+
+Model 2 understands the timing of the spikes, but the variance is too
+extreme for the blue band to cover the winter peaks. This requires a log
+transformation.
+
+# 5 Model 3: Log Transformed Model
+
+To address the heteroscedasticity observed in the previous plots, a log
+transformation was applied. This stabilises the variance across seasons.
+The final plot back transforms the values using `expm1()`
+
+```{r}
+#Dealing with Heteroscedacity
+#Apply log transformation
+prophet_data2 <- beijing_data %>%
+    mutate(y = log1p(y_raw))
+##Initialise the model (keeping Chinese New Year)
+prophet_log_model <- prophet(
+    holidays = chinese_new_year,
+    seasonality.mode = "additive" # Must be additive because the data is logged
+)
+
+# Fit the model to our logged data
+prophet_log_model <- fit.prophet(prophet_log_model, prophet_data2)
+
+#Forecast 90 days into the future
+future_log_model <- make_future_dataframe(prophet_log_model, periods = 90)
+forecast_pro <- predict(prophet_log_model, future_log_model)
+
+# Plot
+# We use expm1() to reverse the log1p() so its easier to read
+ggplot() +
+    # The actual data points (semi-transparent grey)
+    geom_point(data = prophet_data2, aes(x = as.Date(ds), y = expm1(y)),
+               color = "gray30", size = 0.5, alpha = 0.4) +
+    # The blue confidence interval
+    geom_ribbon(data = forecast_pro, aes(x = as.Date(ds), ymin = expm1(yhat_lower), ymax = expm1(yhat_upper)),
+                fill = "blue", alpha = 0.2) +
+    # The blue forecast line
+    geom_line(data = forecast_pro, aes(x = as.Date(ds), y = expm1(yhat)),
+              color = "blue", linewidth = 0.8) +
+    ggtitle("Model 3: Log Transformed Prophet Model") +
+    ylab("PM2.5 (μg/m³)") +
+    xlab("Date") +
+    theme_minimal()
+```
+
+Now the prediction interval contains more data points, which is much
+more representative compared to the second model.
+
+# Conclusion
+
+Prophet allowed us to explore many insights from the data, especially
+how cultural events are vital to acknowledge for forecasting
+environmental data.
+
+**How to Improve the Model:**
+
+-   Including weather factors: PM2.5 is also influenced by the weather.
+    We could add daily wind speed or air pressure into the model which
+    allows the model to predict when air traps pollution over the city.
+
+-   Using Air Quality Index (AQI) API: This dataset ends in 2014. Using
+    current data means you could discover different trends in the data
+    e.g the effect of COVID-19 pandemic.
+
+# References
+
+-   Beijing PM2.5 dataset
+    <https://archive.ics.uci.edu/dataset/381/beijing+pm2+5+data>
+-   Datacamp course:
+    <https://www.datacamp.com/courses/reporting-with-rmarkdown>
+-   RStudio reference: <https://rmarkdown.rstudio.com/lesson-1.html>
+-   R Markdown<https://bookdown.org/yihui/rmarkdown/>
+-   Meta's Prophet Github
+    <https://facebook.github.io/prophet/docs/quick_start.html#r-api>
+-   ggplot2
+    <https://rstudio.github.io/cheatsheets/html/data-visualization.html>
+-   dplyr in R - DataDaft
+    <https://www.youtube.com/watch?v=THGFXV4RW8U&list=PLiC1doDIe9rC8RgWPAWqDETE-VbKOWfWl>
+-   lubridate in R
+    <https://rstudio.github.io/cheatsheets/html/lubridate.html>
